@@ -72,6 +72,7 @@ optionable/
 | GET | `/api/trades/:id` | Get single trade |
 | POST | `/api/trades` | Create new trade |
 | PUT | `/api/trades/:id` | Update trade |
+| DELETE | `/api/trades` | Delete all trades (clear database) |
 | DELETE | `/api/trades/:id` | Delete trade |
 | GET | `/api/stats` | Get aggregated stats |
 

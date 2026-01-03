@@ -313,7 +313,19 @@ app.put('/api/trades/:id', (req, res) => {
     }
 });
 
-// DELETE trade
+// DELETE all trades (clear database)
+app.delete('/api/trades', (req, res) => {
+    try {
+        const result = db.prepare('DELETE FROM trades').run();
+        const deleted = result.changes || 0;
+        res.json({ deleted });
+    } catch (error) {
+        console.error('Error clearing trades:', error);
+        res.status(500).json({ error: 'Failed to clear trades' });
+    }
+});
+
+// DELETE trade by id
 app.delete('/api/trades/:id', (req, res) => {
     try {
         const result = db.prepare('DELETE FROM trades WHERE id = ?').run(req.params.id);

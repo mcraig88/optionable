@@ -17,6 +17,9 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - Extracted parsing logic to `src/lib/robinhoodParser.js` for better testability and reuse. ✅
 
+### Fixed
+- Clear Database now works: added `DELETE /api/trades` backend endpoint that deletes all trades and returns `{ deleted: N }`. ✅
+
 ### Notes
 - Sample CSV download added to the UI for quick examples (Robinhood and generic formats).
 - Consider adding more unit tests to cover edge cases and variations in real-world Robinhood CSV files.
