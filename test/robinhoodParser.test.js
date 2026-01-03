@@ -37,6 +37,9 @@ describe('parseRobinhoodRows', () => {
         expect(trades[0].status).toBe('Rolled');
         expect(trades[0].strike).toBe(76);
         expect(trades[0].closedDate).toBe('12/31/2025');
+        // Ensure description and transaction code are preserved for matching/upserts
+        expect(trades[0].description).toBe('CRWV 1/2/2026 Put $76.00');
+        expect(trades[0].trans).toBe('STO');
     });
 
     it('parses CSV text into rows with parseCSV then processes them', () => {

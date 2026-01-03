@@ -435,7 +435,7 @@ export default function App() {
     };
 
     const addPreviewRow = () => {
-        setPreviewTrades(prev => [...prev, { ticker: '', type: 'CSP', strike: null, quantity: 1, entryPrice: 0, openedDate: new Date().toISOString().split('T')[0], expirationDate: '', status: 'Open' }]);
+        setPreviewTrades(prev => [...prev, { ticker: '', type: 'CSP', strike: null, quantity: 1, entryPrice: 0, openedDate: new Date().toISOString().split('T')[0], expirationDate: '', status: 'Open', description: '', trans: '' }]);
     };
 
     const removePreviewRow = (index) => {
@@ -447,16 +447,98 @@ export default function App() {
             setError('No trades to import');
             return;
         }
-        try {
-            const response = await fetch(`${API_URL}/trades/import`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ trades: previewTrades }),
+
+        // Helper to normalize dates to YYYY-MM-DD (safe fallback to original string)
+        const normalizeDate = (d) => {
+            try {
+                if (!d) return '';
+                const nd = new Date(d);
+                if (isNaN(nd)) return d;
+                return nd.toISOString().split('T')[0];
+            } catch (err) {
+                return d;
+            }
+        };
+
+        // Matching heuristic for duplicates
+        const findExistingTrade = (t) => {
+            const tDate = normalizeDate(t.openedDate);
+            return trades.find(ex => {
+                try {
+                    const exDate = normalizeDate(ex.openedDate);
+                    if (ex.ticker.toUpperCase() !== (t.ticker || '').toUpperCase()) return false;
+                    if (exDate !== tDate) return false;
+                    if ((ex.strike || '') !== (t.strike || '')) {
+                        // compare numerically if present
+                        if (ex.strike == null || t.strike == null) return false;
+                        if (Number(ex.strike) !== Number(t.strike)) return false;
+                    }
+                    if (Number(ex.quantity) !== Number(t.quantity)) return false;
+                    const exEntry = Number(ex.entryPrice || 0);
+                    const tEntry = Number(t.entryPrice || 0);
+                    if (Math.abs(exEntry - tEntry) > 0.0001) return false;
+                    // If both have descriptions, require normalized descriptions match
+                    if (t.description && ex.description) {
+                        if (normalizeDesc(t.description) !== normalizeDesc(ex.description)) return false;
+                    }
+                    // If both have a transaction code (trans), require they match
+                    if (t.trans && ex.trans) {
+                        if ((t.trans || '').toString().toUpperCase() !== (ex.trans || '').toString().toUpperCase()) return false;
+                    }
+                    return true;
+                } catch (e) {
+                    return false;
+                }
             });
-            if (!response.ok) throw new Error('Import failed');
-            const result = await response.json();
+        };
+
+        let created = 0;
+        let updated = 0;
+
+        try {
+            for (const t of previewTrades) {
+                const payload = {
+                    ticker: (t.ticker || '').toUpperCase(),
+                    type: t.type || 'CSP',
+                    strike: t.strike != null && t.strike !== '' ? Number(t.strike) : null,
+                    quantity: Number(t.quantity) || 1,
+                    delta: t.delta != null ? (t.delta === '' ? null : Number(t.delta)) : null,
+                    entryPrice: Number(t.entryPrice) || 0,
+                    closePrice: t.closePrice != null ? Number(t.closePrice) : 0,
+                    openedDate: normalizeDate(t.openedDate) || new Date().toISOString().split('T')[0],
+                    expirationDate: t.expirationDate || '',
+                    closedDate: t.closedDate || null,
+                    status: t.status || 'Open',
+                    // Include original description and transaction code so backend can persist/match
+                    description: t.description || '',
+                    trans: t.trans || '',
+                    parentTradeId: t.parentTradeId || null,
+                };
+
+                const existing = findExistingTrade(t);
+                if (existing) {
+                    // Merge payload onto existing to avoid dropping fields
+                    const merged = { ...existing, ...payload };
+                    const res = await fetch(`${API_URL}/trades/${existing.id}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(merged),
+                    });
+                    if (!res.ok) throw new Error('Failed to update trade');
+                    updated++;
+                } else {
+                    const res = await fetch(`${API_URL}/trades`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+                    if (!res.ok) throw new Error('Failed to create trade');
+                    created++;
+                }
+            }
+
             await fetchTrades();
-            alert(`Imported ${result.imported || previewTrades.length} trades`);
+            alert(`Imported trades: ${created} created, ${updated} updated`);
             closePreview();
         } catch (err) {
             console.error('Error importing trades:', err);

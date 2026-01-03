@@ -160,6 +160,9 @@ export const parseRobinhoodRows = (rows) => {
             expirationDate: expiry,
             closedDate: null,
             status: 'Open',
+            // Preserve original descriptor and transaction code for matching/upserts
+            description: sto.description || '',
+            trans: sto.trans || '',
         };
 
         const norm = normalizeDesc(sto.description);
