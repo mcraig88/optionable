@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
     Plus,
     Trash2,
@@ -101,6 +101,12 @@ export default function App() {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingId, setEditingId] = useState(null);
     const [currentPage, setCurrentPage] = useState(1);
+
+    // Import / Preview state
+    const [importMode, setImportMode] = useState('Auto'); // Auto | Optional | Robinhood
+    const [previewTrades, setPreviewTrades] = useState([]);
+    const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+    const fileInputRef = useRef(null);
 
     // Form State
     const initialFormState = {
@@ -335,7 +341,7 @@ export default function App() {
     };
 
     // --- CSV Export ---
-    const exportToCSV = () => {
+    const exportTradesToCSV = () => {
         if (trades.length === 0) {
             setError('No trades to export');
             return;
@@ -364,76 +370,298 @@ export default function App() {
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
+    }; 
+
+    // --- CSV Import & Preview (Robinhood aware) ---
+
+    // Lightweight CSV parser that handles quoted fields
+    const parseCSV = (text) => {
+        const rows = [];
+        let cur = '';
+        let row = [];
+        let inQuotes = false;
+        for (let i = 0; i < text.length; i++) {
+            const ch = text[i];
+            const next = text[i + 1];
+            if (ch === '"') {
+                if (inQuotes && next === '"') { // escaped quote
+                    cur += '"';
+                    i++;
+                } else {
+                    inQuotes = !inQuotes;
+                }
+            } else if (ch === ',' && !inQuotes) {
+                row.push(cur);
+                cur = '';
+            } else if ((ch === '\n' || ch === '\r') && !inQuotes) {
+                // handle CRLF and LF
+                if (cur !== '' || row.length > 0) {
+                    row.push(cur);
+                    rows.push(row);
+                    row = [];
+                    cur = '';
+                }
+                // skip possible LF after CR
+                if (ch === '\r' && next === '\n') i++;
+            } else {
+                cur += ch;
+            }
+        }
+        if (cur !== '' || row.length > 0) {
+            row.push(cur);
+            rows.push(row);
+        }
+
+        if (rows.length === 0) return [];
+        const headers = rows[0].map(h => h.trim());
+        return rows.slice(1).map(r => {
+            const obj = {};
+            for (let i = 0; i < headers.length; i++) {
+                obj[headers[i]] = (r[i] || '').trim();
+            }
+            return obj;
+        });
     };
 
-    // --- CSV Import ---
-    const importFromCSV = async (event) => {
+    const detectFormat = (headers) => {
+        const lower = headers.map(h => h.toLowerCase());
+        if (lower.includes('activity date') || lower.includes('activitydate') || lower.includes('instrument')) return 'Robinhood';
+        if (lower.includes('ticker') || lower.includes('type')) return 'Optional';
+        return 'Optional';
+    };
+
+    const normalizeDesc = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+    const parseInstrument = (instrument) => {
+        // Extract ticker, strike, type, expiry heuristically
+        if (!instrument) return {};
+        // Examples handled: "AAPL 01/16/26 145 Put", "AAPL 145 Put 2026-01-16", "AAPL 01/16/26 145 P"
+        const res = { ticker: '', strike: null, type: '', expiry: '' };
+        const parts = instrument.replace(/\s+/g, ' ').trim().split(' ');
+        // First part that is all letters -> ticker
+        if (parts.length > 0 && /^[A-Za-z\.]{1,6}$/.test(parts[0])) {
+            res.ticker = parts[0].toUpperCase();
+        }
+        // Find strike (number with optional decimals)
+        const strikePart = parts.find(p => /^\d+(?:\.\d+)?$/.test(p.replace(/[^0-9.]/g, '')));
+        if (strikePart) res.strike = Number(strikePart.replace(/[^0-9.]/g, ''));
+        // Find type
+        const typePart = parts.find(p => /put|call|p|c/i.test(p));
+        if (typePart) res.type = /put/i.test(typePart) || /^p$/i.test(typePart) ? 'Put' : 'Call';
+        // Find expiry: look for MM/DD/YY or YYYY-MM-DD
+        const expiryPart = parts.find(p => /\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}/.test(p) || /\d{4}-\d{2}-\d{2}/.test(p));
+        if (expiryPart) {
+            // normalize to yyyy-mm-dd if possible
+            const m = expiryPart.match(/(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})/);
+            if (m) {
+                let [_, mm, dd, yy] = m;
+                if (yy.length === 2) yy = '20' + yy;
+                res.expiry = `${yy.padStart(4, '0')}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
+            } else {
+                const n = expiryPart.match(/(\d{4})-(\d{2})-(\d{2})/);
+                if (n) res.expiry = `${n[1]}-${n[2]}-${n[3]}`;
+            }
+        }
+        return res;
+    };
+
+    const parseRobinhoodRows = (rows) => {
+        // Find column keys heuristically
+        const sample = rows[0] || {};
+        const keys = Object.keys(sample);
+        const k = (nameCandidates) => keys.find(h => nameCandidates.some(n => h.toLowerCase().includes(n)));
+
+        const dateKey = k(['activity date', 'activitydate', 'date']);
+        const descKey = k(['description', 'desc']);
+        const amountKey = k(['amount', 'net amount', 'price']);
+        const qtyKey = k(['quantity', 'qty']);
+        const instrKey = k(['instrument', 'symbol', 'instrument symbol']);
+        const transKey = k(['trans code', 'transcode', 'transaction', 'activity type', 'action']);
+        const processKey = k(['process', 'settle', 'process/settle']);
+
+        const canonicalRows = rows.map(r => ({
+            activityDate: r[dateKey] || r[dateKey?.toLowerCase()] || '',
+            description: r[descKey] || '',
+            amount: (r[amountKey] || '').replace(/[^0-9\.-]/g, ''),
+            quantity: (r[qtyKey] || '').replace(/[^0-9\.-]/g, ''),
+            instrument: r[instrKey] || '',
+            trans: r[transKey] || '',
+            process: r[processKey] || '',
+            raw: r,
+        }));
+
+        // ignore process/settle rows
+        const filtered = canonicalRows.filter(rr => {
+            const p = (rr.process || '').toLowerCase();
+            return !(p.includes('process') || p.includes('settle'));
+        });
+
+        const stoRows = filtered.filter(rr => (rr.trans || '').toUpperCase() === 'STO' && /put/i.test(rr.description));
+        const btcRows = filtered.filter(rr => (rr.trans || '').toUpperCase() === 'BTC');
+
+        const trades = [];
+
+        // Helper to derive price
+        const derivePrice = (row) => {
+            // prefer explicit price column if present and valid
+            const amt = Number(row.amount) || 0;
+            const qty = Math.abs(Number(row.quantity)) || 1;
+            // amount in broker CSVs often reflects total premium (negative for sell)
+            const price = Math.abs(amt) / (qty * 100) || 0;
+            return price;
+        };
+
+        // Map STO rows to trades
+        stoRows.forEach(sto => {
+            const parsed = parseInstrument(sto.instrument || sto.description);
+            const qty = Math.abs(Number(sto.quantity)) || 1;
+            const entry = derivePrice(sto);
+            const ticker = parsed.ticker || (sto.instrument || '').split(' ')[0] || '';
+            const strike = parsed.strike || null;
+            const expiry = parsed.expiry || '';
+            const openedDate = sto.activityDate;
+
+            const trade = {
+                ticker: ticker.toUpperCase(),
+                type: 'CSP', // STO Put => covered short put
+                strike: strike,
+                quantity: qty,
+                entryPrice: entry,
+                closePrice: 0,
+                openedDate,
+                expirationDate: expiry,
+                closedDate: null,
+                status: 'Open',
+            };
+
+            // strict roll detection: find BTC with same normalized description, date >= sto date
+            const norm = normalizeDesc(sto.description);
+            const candidate = btcRows.find(btc => {
+                if (normalizeDesc(btc.description) !== norm) return false;
+                // date compare
+                const stoDate = new Date(openedDate);
+                const btcDate = new Date(btc.activityDate);
+                if (isNaN(stoDate) || isNaN(btcDate)) return false;
+                if (btcDate < stoDate) return false;
+                // If both have strikes, require equal
+                const btcParsed = parseInstrument(btc.instrument || btc.description);
+                if (strike && btcParsed.strike && Number(strike) !== Number(btcParsed.strike)) return false;
+                if (expiry && btcParsed.expiry && expiry !== btcParsed.expiry) return false;
+                return true;
+            });
+
+            if (candidate) {
+                trade.status = 'Rolled';
+                trade.closedDate = candidate.activityDate;
+                trade.closePrice = derivePrice(candidate);
+            }
+
+            trades.push(trade);
+        });
+
+        return trades;
+    };
+
+    const handleFilePick = async (event) => {
         const file = event.target.files?.[0];
         if (!file) return;
-
         try {
             const text = await file.text();
-            const lines = text.split('\n').filter(line => line.trim());
-
-            if (lines.length < 2) {
+            const rows = parseCSV(text);
+            if (!rows || rows.length === 0) {
                 setError('CSV file is empty or invalid');
+                event.target.value = '';
                 return;
             }
 
-            const headers = lines[0].split(',').map(h => h.trim());
-            const requiredHeaders = ['ticker', 'type', 'strike', 'entryPrice', 'openedDate', 'expirationDate', 'status'];
-            const missingHeaders = requiredHeaders.filter(h => !headers.includes(h));
+            const headers = Object.keys(rows[0] || {});
+            const mode = importMode === 'Auto' ? detectFormat(headers) : importMode;
 
-            if (missingHeaders.length > 0) {
-                setError(`Missing required columns: ${missingHeaders.join(', ')}`);
-                return;
+            let parsedTrades = [];
+            if (mode === 'Robinhood') {
+                parsedTrades = parseRobinhoodRows(rows);
+            } else {
+                // Optional / generic format: look for expected headers
+                parsedTrades = rows.map(r => ({
+                    ticker: (r['ticker'] || r['Ticker'] || '').toUpperCase(),
+                    type: r['type'] || 'CSP',
+                    strike: r['strike'] ? Number(r['strike']) : null,
+                    quantity: r['quantity'] ? Number(r['quantity']) : 1,
+                    entryPrice: r['entryPrice'] ? Number(r['entryPrice']) : (r['price'] ? Number(r['price']) : 0),
+                    closePrice: r['closePrice'] ? Number(r['closePrice']) : 0,
+                    openedDate: r['openedDate'] || r['Activity Date'] || r['activityDate'] || new Date().toISOString().split('T')[0],
+                    expirationDate: r['expirationDate'] || r['Expiry'] || '',
+                    closedDate: r['closedDate'] || null,
+                    status: r['status'] || 'Open',
+                }));
             }
 
-            const tradesToImport = [];
-            for (let i = 1; i < lines.length; i++) {
-                const values = lines[i].split(',').map(v => v.trim().replace(/^"|"$/g, ''));
-                const trade = {};
-                headers.forEach((header, index) => {
-                    trade[header] = values[index] || null;
-                });
+            // Show preview modal with parsed trades, allow edit
+            setPreviewTrades(parsedTrades);
+            setIsPreviewOpen(true);
+            setError(null);
+        } catch (err) {
+            console.error('Error parsing CSV:', err);
+            setError('Failed to parse CSV. Ensure it is a valid CSV file.');
+            event.target.value = '';
+        }
+    };
 
-                // Validate and convert types
-                tradesToImport.push({
-                    ticker: trade.ticker,
-                    type: trade.type,
-                    strike: Number(trade.strike) || 0,
-                    quantity: Number(trade.quantity) || 1,
-                    delta: trade.delta ? Number(trade.delta) : null,
-                    entryPrice: Number(trade.entryPrice) || 0,
-                    closePrice: Number(trade.closePrice) || 0,
-                    openedDate: trade.openedDate,
-                    expirationDate: trade.expirationDate,
-                    closedDate: trade.closedDate || null,
-                    status: trade.status || 'Open',
-                    parentTradeId: trade.parentTradeId ? Number(trade.parentTradeId) : null,
-                });
-            }
+    const closePreview = () => {
+        setIsPreviewOpen(false);
+        setPreviewTrades([]);
+        if (fileInputRef?.current) fileInputRef.current.value = '';
+    };
 
-            // Import trades via API
+    const updatePreviewRow = (index, key, value) => {
+        setPreviewTrades(prev => prev.map((r, i) => i === index ? { ...r, [key]: value } : r));
+    };
+
+    const addPreviewRow = () => {
+        setPreviewTrades(prev => [...prev, { ticker: '', type: 'CSP', strike: null, quantity: 1, entryPrice: 0, openedDate: new Date().toISOString().split('T')[0], expirationDate: '', status: 'Open' }]);
+    };
+
+    const removePreviewRow = (index) => {
+        setPreviewTrades(prev => prev.filter((_, i) => i !== index));
+    };
+
+    const confirmImport = async () => {
+        if (previewTrades.length === 0) {
+            setError('No trades to import');
+            return;
+        }
+        try {
             const response = await fetch(`${API_URL}/trades/import`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ trades: tradesToImport }),
+                body: JSON.stringify({ trades: previewTrades }),
             });
-
-            if (!response.ok) throw new Error('Failed to import trades');
-
+            if (!response.ok) throw new Error('Import failed');
             const result = await response.json();
             await fetchTrades();
-            alert(`Successfully imported ${result.imported} trades!`);
+            alert(`Imported ${result.imported || previewTrades.length} trades`);
+            closePreview();
         } catch (err) {
-            console.error('Error importing CSV:', err);
-            setError('Failed to import CSV. Please check the file format.');
+            console.error('Error importing trades:', err);
+            setError('Failed to import trades.');
         }
-
-        // Reset file input
-        event.target.value = '';
     };
+
+    const downloadSampleCSV = (mode) => {
+        let csv = '';
+        if (mode === 'Robinhood') {
+            csv = `"Activity Date","Description","Amount","Quantity","Instrument","Trans Code","Process/Settle"\n"2025-01-02","Sold 1 Put AAPL 01/17/25 145 Put","-50.00","1","AAPL 01/17/25 145 Put","STO",""\n"2025-03-01","Buy to Close 1 Put AAPL 01/17/25 145 Put","45.00","1","AAPL 01/17/25 145 Put","BTC",""`;
+        } else {
+            csv = `ticker,type,strike,quantity,entryPrice,openedDate,expirationDate,status\nAAPL,CSP,145,1,0.50,2025-01-02,2025-01-17,Open`;
+        }
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `sample_${mode || 'Optional'}.csv`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    }; 
 
     // --- Aggregation Logic ---
     const stats = useMemo(() => {
@@ -619,7 +847,7 @@ export default function App() {
                     <div className="mt-4 md:mt-0 flex items-center gap-2">
                         {/* Export Button */}
                         <button
-                            onClick={exportToCSV}
+                            onClick={exportTradesToCSV}
                             className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-lg font-medium transition-colors"
                             title="Export to CSV"
                         >
@@ -627,17 +855,31 @@ export default function App() {
                             <span className="hidden sm:inline">Export</span>
                         </button>
 
-                        {/* Import Button */}
-                        <label className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-lg font-medium transition-colors cursor-pointer" title="Import from CSV">
-                            <Upload className="w-4 h-4" />
-                            <span className="hidden sm:inline">Import</span>
-                            <input
-                                type="file"
-                                accept=".csv"
-                                onChange={importFromCSV}
-                                className="hidden"
-                            />
-                        </label>
+                        {/* Import Mode Selector + Import Button */}
+                        <div className="flex items-center gap-3">
+                            <div className="flex flex-col">
+                                <select value={importMode} onChange={(e) => setImportMode(e.target.value)} className="px-2 py-2 border border-slate-200 rounded-lg text-sm bg-white">
+                                    <option value="Auto">Auto</option>
+                                    <option value="Optional">Optional</option>
+                                    <option value="Robinhood">Robinhood</option>
+                                </select>
+                                <span className="text-xs text-slate-400 mt-1">Detects Robinhood Activity CSVs (Activity Date / Instrument)</span>
+                            </div>
+
+                            <label className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-lg font-medium transition-colors cursor-pointer" title="Import from CSV">
+                                <Upload className="w-4 h-4" />
+                                <span className="hidden sm:inline">Import</span>
+                                <input
+                                    ref={fileInputRef}
+                                    type="file"
+                                    accept=".csv"
+                                    onChange={handleFilePick}
+                                    className="hidden"
+                                />
+                            </label>
+
+                            <button onClick={() => downloadSampleCSV(importMode === 'Auto' ? 'Robinhood' : importMode)} className="px-2 py-2 border rounded text-sm text-slate-600 hover:bg-slate-50">Sample</button>
+                        </div> 
 
                         {/* New Trade Button */}
                         <button
@@ -997,9 +1239,93 @@ export default function App() {
 
             </div>
 
+            {/* Preview Import Modal */}
+            {isPreviewOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm overflow-y-auto">
+                    <div className="bg-white rounded-2xl shadow-xl w-full max-w-4xl overflow-hidden my-8">
+                        <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                            <div>
+                                <h2 className="text-lg font-bold text-slate-800">Preview Trades to Import</h2>
+                                <p className="text-sm text-slate-500">Edit rows before confirming import to <code>/api/trades/import</code></p>
+                            </div>
+                            <button onClick={closePreview} className="text-slate-400 hover:text-slate-600">
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        <div className="p-4 space-y-4">
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm text-left">
+                                    <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-100">
+                                        <tr>
+                                            <th className="px-3 py-2">#</th>
+                                            <th className="px-3 py-2">Ticker</th>
+                                            <th className="px-3 py-2">Type</th>
+                                            <th className="px-3 py-2">Strike</th>
+                                            <th className="px-3 py-2">Qty</th>
+                                            <th className="px-3 py-2">Entry</th>
+                                            <th className="px-3 py-2">Opened</th>
+                                            <th className="px-3 py-2">Expiry</th>
+                                            <th className="px-3 py-2">Status</th>
+                                            <th className="px-3 py-2">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                        {previewTrades.length === 0 ? (
+                                            <tr>
+                                                <td colSpan="10" className="px-4 py-12 text-center text-slate-400">No trades to preview</td>
+                                            </tr>
+                                        ) : (
+                                            previewTrades.map((row, idx) => (
+                                                <tr key={idx}>
+                                                    <td className="px-3 py-2">{idx + 1}</td>
+                                                    <td className="px-3 py-2"><input className="w-full px-2 py-1 border rounded" value={row.ticker || ''} onChange={(e) => updatePreviewRow(idx, 'ticker', e.target.value.toUpperCase())} /></td>
+                                                    <td className="px-3 py-2">
+                                                        <select className="w-full px-2 py-1 border rounded" value={row.type || 'CSP'} onChange={(e) => updatePreviewRow(idx, 'type', e.target.value)}>
+                                                            <option value="CSP">CSP</option>
+                                                            <option value="CC">CC</option>
+                                                            <option value="Put">Put</option>
+                                                            <option value="Call">Call</option>
+                                                        </select>
+                                                    </td>
+                                                    <td className="px-3 py-2"><input type="number" step="0.01" className="w-full px-2 py-1 border rounded" value={row.strike ?? ''} onChange={(e) => updatePreviewRow(idx, 'strike', e.target.value)} /></td>
+                                                    <td className="px-3 py-2 text-center"><input type="number" className="w-16 px-2 py-1 border rounded text-center" value={row.quantity ?? 1} onChange={(e) => updatePreviewRow(idx, 'quantity', Number(e.target.value))} /></td>
+                                                    <td className="px-3 py-2"><input type="number" step="0.01" className="w-24 px-2 py-1 border rounded" value={row.entryPrice ?? 0} onChange={(e) => updatePreviewRow(idx, 'entryPrice', Number(e.target.value))} /></td>
+                                                    <td className="px-3 py-2"><input type="date" className="w-full px-2 py-1 border rounded" value={row.openedDate ? row.openedDate.split('T')[0] : ''} onChange={(e) => updatePreviewRow(idx, 'openedDate', e.target.value)} /></td>
+                                                    <td className="px-3 py-2"><input type="date" className="w-full px-2 py-1 border rounded" value={row.expirationDate ? row.expirationDate.split('T')[0] : ''} onChange={(e) => updatePreviewRow(idx, 'expirationDate', e.target.value)} /></td>
+                                                    <td className="px-3 py-2">
+                                                        <select className="w-full px-2 py-1 border rounded" value={row.status || 'Open'} onChange={(e) => updatePreviewRow(idx, 'status', e.target.value)}>
+                                                            <option>Open</option>
+                                                            <option>Rolled</option>
+                                                            <option>Closed</option>
+                                                        </select>
+                                                    </td>
+                                                    <td className="px-3 py-2">
+                                                        <button type="button" onClick={() => removePreviewRow(idx)} className="text-red-500 hover:text-red-700"><Trash2 className="w-4 h-4" /></button>
+                                                    </td>
+                                                </tr>
+                                            ))
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <button onClick={addPreviewRow} className="px-3 py-2 bg-slate-100 hover:bg-slate-200 rounded font-medium">Add Row</button>
+                                    <button onClick={closePreview} className="px-3 py-2 border rounded">Cancel</button>
+                                </div>
+                                <div>
+                                    <button onClick={confirmImport} className="px-4 py-2 bg-indigo-600 text-white rounded font-bold">Import {previewTrades.length} Trades</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Modal */}
             {isModalOpen && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm overflow-y-auto">
                     <div className="modal-enter bg-white rounded-2xl shadow-xl w-full max-w-xl overflow-hidden my-8">
                         <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50">
                             <div>
