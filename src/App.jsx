@@ -433,35 +433,53 @@ export default function App() {
     const normalizeDesc = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
 
     const parseInstrument = (instrument) => {
-        // Extract ticker, strike, type, expiry heuristically
-        if (!instrument) return {};
-        // Examples handled: "AAPL 01/16/26 145 Put", "AAPL 145 Put 2026-01-16", "AAPL 01/16/26 145 P"
+        // Improved extraction: prioritize $-strike and explicit date-based expiry
+        if (!instrument) return { ticker: '', strike: null, type: '', expiry: '' };
+        const s = instrument.replace(/\s+/g, ' ').trim();
         const res = { ticker: '', strike: null, type: '', expiry: '' };
-        const parts = instrument.replace(/\s+/g, ' ').trim().split(' ');
-        // First part that is all letters -> ticker
-        if (parts.length > 0 && /^[A-Za-z\.]{1,6}$/.test(parts[0])) {
-            res.ticker = parts[0].toUpperCase();
+
+        // Strike: prefer explicit $NN(.NN) pattern
+        const dollarStrike = s.match(/\$\s*([0-9]+(?:\.[0-9]+)?)/);
+        if (dollarStrike) {
+            res.strike = Number(dollarStrike[1]);
+        } else {
+            // fallback: number immediately before Put/Call (e.g. "145 Put")
+            const beforeType = s.match(/(\d+(?:\.\d+)?)\s+(?=Put|Call|P\b|C\b)/i);
+            if (beforeType) res.strike = Number(beforeType[1]);
         }
-        // Find strike (number with optional decimals)
-        const strikePart = parts.find(p => /^\d+(?:\.\d+)?$/.test(p.replace(/[^0-9.]/g, '')));
-        if (strikePart) res.strike = Number(strikePart.replace(/[^0-9.]/g, ''));
-        // Find type
-        const typePart = parts.find(p => /put|call|p|c/i.test(p));
-        if (typePart) res.type = /put/i.test(typePart) || /^p$/i.test(typePart) ? 'Put' : 'Call';
-        // Find expiry: look for MM/DD/YY or YYYY-MM-DD
-        const expiryPart = parts.find(p => /\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}/.test(p) || /\d{4}-\d{2}-\d{2}/.test(p));
-        if (expiryPart) {
-            // normalize to yyyy-mm-dd if possible
-            const m = expiryPart.match(/(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})/);
+
+        // Expiry: mm/dd/yyyy or mm/dd/yy or yyyy-mm-dd
+        const expMatch = s.match(/(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/) || s.match(/(\d{4}-\d{2}-\d{2})/);
+        if (expMatch) {
+            const p = expMatch[1];
+            const m = p.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
             if (m) {
-                let [_, mm, dd, yy] = m;
+                let [, mm, dd, yy] = m;
                 if (yy.length === 2) yy = '20' + yy;
                 res.expiry = `${yy.padStart(4, '0')}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
             } else {
-                const n = expiryPart.match(/(\d{4})-(\d{2})-(\d{2})/);
+                const n = p.match(/(\d{4})-(\d{2})-(\d{2})/);
                 if (n) res.expiry = `${n[1]}-${n[2]}-${n[3]}`;
             }
         }
+
+        // Type: Put/Call
+        const typeMatch = s.match(/\b(put|call|p|c)\b/i);
+        if (typeMatch) res.type = /put/i.test(typeMatch[1]) || /^p$/i.test(typeMatch[1]) ? 'Put' : 'Call';
+
+        // Ticker: prefer leading token if alphabetic; otherwise, find first all-alpha token that isn't a common word
+        const firstToken = s.split(' ')[0];
+        if (/^[A-Za-z\.]{1,6}$/.test(firstToken)) res.ticker = firstToken.toUpperCase();
+        if (!res.ticker) {
+            const tokens = s.split(' ');
+            for (const t of tokens) {
+                if (/^[A-Za-z\.]{1,6}$/.test(t) && !/\b(put|call|sold|buy|to|close|option|expiration|cusip|for|buy)\b/i.test(t)) {
+                    res.ticker = t.toUpperCase();
+                    break;
+                }
+            }
+        }
+
         return res;
     };
 
@@ -513,7 +531,7 @@ export default function App() {
 
         // Map STO rows to trades
         stoRows.forEach(sto => {
-            const parsed = parseInstrument(sto.instrument || sto.description);
+            const parsed = parseInstrument(sto.description || sto.instrument);
             const qty = Math.abs(Number(sto.quantity)) || 1;
             const entry = derivePrice(sto);
             const ticker = parsed.ticker || (sto.instrument || '').split(' ')[0] || '';
@@ -544,7 +562,7 @@ export default function App() {
                 if (isNaN(stoDate) || isNaN(btcDate)) return false;
                 if (btcDate < stoDate) return false;
                 // If both have strikes, require equal
-                const btcParsed = parseInstrument(btc.instrument || btc.description);
+                const btcParsed = parseInstrument(btc.description || btc.instrument);
                 if (strike && btcParsed.strike && Number(strike) !== Number(btcParsed.strike)) return false;
                 if (expiry && btcParsed.expiry && expiry !== btcParsed.expiry) return false;
                 return true;
