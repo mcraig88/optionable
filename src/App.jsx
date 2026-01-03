@@ -378,48 +378,6 @@ export default function App() {
     // Parser helpers have been moved to src/lib/robinhoodParser.js and are imported at the top of this file.
     // The functions available are: parseCSV, detectFormat, normalizeDesc, parseInstrument, derivePrice, parseRobinhoodRows
 
-    
-
-            const trade = {
-                ticker: ticker.toUpperCase(),
-                type: 'CSP', // STO Put => covered short put
-                strike: strike,
-                quantity: qty,
-                entryPrice: entry,
-                closePrice: 0,
-                openedDate,
-                expirationDate: expiry,
-                closedDate: null,
-                status: 'Open',
-            };
-
-            // strict roll detection: find BTC with same normalized description, date >= sto date
-            const norm = normalizeDesc(sto.description);
-            const candidate = btcRows.find(btc => {
-                if (normalizeDesc(btc.description) !== norm) return false;
-                // date compare
-                const stoDate = new Date(openedDate);
-                const btcDate = new Date(btc.activityDate);
-                if (isNaN(stoDate) || isNaN(btcDate)) return false;
-                if (btcDate < stoDate) return false;
-                // If both have strikes, require equal
-                const btcParsed = parseInstrument(btc.description || btc.instrument);
-                if (strike && btcParsed.strike && Number(strike) !== Number(btcParsed.strike)) return false;
-                if (expiry && btcParsed.expiry && expiry !== btcParsed.expiry) return false;
-                return true;
-            });
-
-            if (candidate) {
-                trade.status = 'Rolled';
-                trade.closedDate = candidate.activityDate;
-                trade.closePrice = derivePrice(candidate);
-            }
-
-            trades.push(trade);
-        });
-
-        return trades;
-    };
 
     const handleFilePick = async (event) => {
         const file = event.target.files?.[0];
@@ -716,8 +674,8 @@ export default function App() {
 
                         {/* Import Mode Selector + Import Button */}
                         <div className="flex items-center gap-3">
-                            <div className="flex flex-col">
-                                <select value={importMode} onChange={(e) => setImportMode(e.target.value)} className="px-2 py-2 border border-slate-200 rounded-lg text-sm bg-white">
+                            <div className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-lg font-medium transition-colors">
+                                <select value={importMode} onChange={(e) => setImportMode(e.target.value)} className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-lg font-medium transition-colors">
                                     <option value="Auto">Auto</option>
                                     <option value="Optional">Optional</option>
                                     <option value="Robinhood">Robinhood</option>
@@ -737,7 +695,9 @@ export default function App() {
                                 />
                             </label>
 
-                            <button onClick={() => downloadSampleCSV(importMode === 'Auto' ? 'Robinhood' : importMode)} className="px-2 py-2 border rounded text-sm text-slate-600 hover:bg-slate-50">Sample</button>
+                            
+                            {/* <button onClick={() => downloadSampleCSV(importMode === 'Auto' ? 'Robinhood' : importMode)} className="px-2 py-2 border rounded text-sm text-slate-600 hover:bg-slate-50">Sample</button> */}
+                            
                         </div> 
 
                         {/* New Trade Button */}
@@ -1379,14 +1339,14 @@ export default function App() {
                             <div className="pt-4 flex gap-3">
                                 <button type="button" onClick={closeModal} className="flex-1 px-4 py-2 border border-slate-300 rounded-lg text-slate-700 font-medium hover:bg-slate-50">Cancel</button>
                                 <button type="submit" className="flex-1 px-4 py-2 bg-indigo-600 rounded-lg text-white font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-200">
-                                    {editingId ? 'Update Trade' : isRolling ? 'Roll & Create New' : 'Save Trade'}
+                                    {editingId ? 'Update Trade' : (isRolling ? 'Roll & Create New' : 'Save Trade')}
                                 </button>
                             </div>
 
                         </form>
                     </div>
-                </div>
+                //</div>
             )}
         </div>
     );
-}
+};
