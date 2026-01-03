@@ -95,7 +95,15 @@ export const parseInstrument = (instrument) => {
 export const derivePrice = (row) => {
     const amt = Number((row.amount || '').replace(/[^0-9\.-]/g, '')) || 0;
     const qty = Math.abs(Number(row.quantity)) || 1;
-    const price = Math.abs(amt) / (qty * 100) || 0;
+    const absAmt = Math.abs(amt);
+
+    // Heuristic: if the amount is small (e.g., $0.22) treat it as a per-share price already.
+    // Otherwise assume it's the total dollars for the contract(s) and divide by (qty * 100).
+    if (absAmt > 0 && absAmt < 10) {
+        return absAmt;
+    }
+
+    const price = absAmt / (qty * 100) || 0;
     return price;
 };
 

@@ -24,6 +24,11 @@ describe('derivePrice', () => {
         const p2 = derivePrice({ amount: '($223.02)', quantity: '1' });
         expect(Number(p2.toFixed(4))).toBeCloseTo(2.2302, 4);
     });
+
+    it('handles small dollar amounts like $0.22 as per-share price', () => {
+        const p = derivePrice({ amount: '$0.22', quantity: '1' });
+        expect(Number(p.toFixed(4))).toBeCloseTo(0.22, 4);
+    });
 });
 
 describe('parseRobinhoodRows', () => {
