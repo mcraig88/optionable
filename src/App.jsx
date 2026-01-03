@@ -109,6 +109,7 @@ export default function App() {
     const [importMode, setImportMode] = useState('Auto'); // Auto | Optional | Robinhood
     const [previewTrades, setPreviewTrades] = useState([]);
     const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+    const [isClearModalOpen, setIsClearModalOpen] = useState(false);
     const fileInputRef = useRef(null);
 
     // Form State
@@ -252,6 +253,38 @@ export default function App() {
         setIsRolling(false);
         setRollFromTrade(null);
         setRollClosePrice('');
+    };
+
+    // --- Clear Database Modal Handlers ---
+    const openClearModal = () => setIsClearModalOpen(true);
+    const closeClearModal = () => setIsClearModalOpen(false);
+
+    const confirmClearDatabase = async () => {
+        // Number of trades we expect to delete (current local state)
+        const expectedCount = trades ? trades.length : 0;
+        try {
+            const res = await fetch(`${API_URL}/trades`, { method: 'DELETE' });
+            if (!res.ok) {
+                const txt = await res.text();
+                throw new Error(txt || 'Failed to clear trades');
+            }
+
+            // Try to read deleted count from server response, fallback to expectedCount
+            let deleted = expectedCount;
+            try {
+                const data = await res.json();
+                if (data && typeof data.deleted === 'number') deleted = data.deleted;
+            } catch (e) {
+                // ignore parse errors
+            }
+
+            await fetchTrades();
+            closeClearModal();
+            alert(`Deleted ${deleted} trade${deleted !== 1 ? 's' : ''}`);
+        } catch (err) {
+            console.error('Error clearing database:', err);
+            setError('Failed to clear database. Check server logs.');
+        }
     };
 
     const saveTrade = async (e) => {
@@ -782,6 +815,16 @@ export default function App() {
                             
                         </div> 
 
+                        {/* Clear Database Button */}
+                        <button
+                            onClick={openClearModal}
+                            className="flex items-center gap-2 bg-red-50 hover:bg-red-100 text-red-600 px-3 py-2 rounded-lg font-medium transition-colors"
+                            title="Clear all trades from the database"
+                        >
+                            <Trash2 className="w-4 h-4" />
+                            <span className="hidden sm:inline">Clear Database</span>
+                        </button>
+
                         {/* New Trade Button */}
                         <button
                             onClick={() => openModal()}
@@ -1219,6 +1262,32 @@ export default function App() {
                                 <div>
                                     <button onClick={confirmImport} className="px-4 py-2 bg-indigo-600 text-white rounded font-bold">Import {previewTrades.length} Trades</button>
                                 </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Clear Database Confirmation Modal */}
+            {isClearModalOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm overflow-y-auto">
+                    <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden my-8">
+                        <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                            <div>
+                                <h2 className="text-lg font-bold text-slate-800">Clear Database</h2>
+                                <p className="text-sm text-slate-500">This will permanently delete all trades from the database.</p>
+                            </div>
+                            <button onClick={closeClearModal} className="text-slate-400 hover:text-slate-600">
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        <div className="p-6 space-y-4">
+                            <p className="text-slate-700">Are you sure you want to delete <strong>{trades.length}</strong> trade{trades.length !== 1 ? 's' : ''} from the database? This action cannot be undone.</p>
+
+                            <div className="flex justify-end gap-3">
+                                <button onClick={closeClearModal} className="px-3 py-2 border rounded">Cancel</button>
+                                <button onClick={confirmClearDatabase} className="px-4 py-2 bg-red-600 text-white rounded font-bold">Confirm Delete</button>
                             </div>
                         </div>
                     </div>
